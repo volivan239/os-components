@@ -276,10 +276,14 @@ int my_mkdir_or_node(const char *path, mode_t mode) {
     }
 
     inode *new_inode;
-    if ((mode & S_IFMT) == S_IFDIR) {
-        new_inode = gen_new_dir_inode((ino_t) dir_ino, mode);
-    } else {
-        new_inode = gen_new_file_inode((ino_t) dir_ino, mode);
+    try {
+        if ((mode & S_IFMT) == S_IFDIR) {
+            new_inode = gen_new_dir_inode((ino_t) dir_ino, mode);
+        } else {
+            new_inode = gen_new_file_inode((ino_t) dir_ino, mode);
+        }
+    } catch (const std::bad_alloc &_) {
+        return -ENOMEM;
     }
 
     ino_t new_ino = new_inode->stats.ino;
@@ -785,7 +789,13 @@ void *my_init(struct fuse_conn_info *conn) {
     log_msg("\nmy_init()\n");
     my_context* context = my_get_context();
     
-    inode *root_inode = gen_new_dir_inode(0, 0777);
+    inode *root_inode;
+    try {
+        root_inode = gen_new_dir_inode(0, 0777);
+    } catch (const std::bad_alloc &_) {
+        log_msg("Failed to allocate root node, terminating");
+        exit(1);
+    }
 
     context->root_ino = 0;
     context->inodes[0] = root_inode;
@@ -875,10 +885,12 @@ int main(int argc, char *argv[]) {
         abort();
     }
 
-    auto context = new my_context;
-    if (context == NULL) {
-        perror("main calloc");
-        abort();
+    my_context *context;
+    try {
+        context = new my_context;
+    } catch (const std::bad_alloc &_) {
+        log_msg("Failed to allocate context in main, terminating");
+        exit(1);
     }
     
     context->logfile = log_open();
