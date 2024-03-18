@@ -282,13 +282,12 @@ int my_mkdir_or_node(const char *path, mode_t mode) {
         } else {
             new_inode = gen_new_file_inode((ino_t) dir_ino, mode);
         }
+        ino_t new_ino = new_inode->stats.ino;
+        my_get_context()->inodes[new_ino] = new_inode;
+        dir_catalog->insert({name, new_ino});
     } catch (const std::bad_alloc &_) {
         return -ENOMEM;
     }
-
-    ino_t new_ino = new_inode->stats.ino;
-    my_get_context()->inodes[new_ino] = new_inode;
-    dir_catalog->insert({name, new_ino});
 
     if ((mode & S_IFMT) == S_IFDIR) {
         dir_node->stats.nlink++;
@@ -431,7 +430,11 @@ int my_rename(const char *path, const char *newpath) {
     }
 
     if (dst_catalog->find(dst_name) == dst_catalog->end()) {
-        dst_catalog->insert({dst_name, src_ino});
+        try {
+            dst_catalog->insert({dst_name, src_ino});
+        } catch (const std::bad_alloc &_) {
+            return -ENOMEM;
+        }
         src_catalog->erase(src_name);
 
         if ((src_node->stats.mode & S_IFMT) == S_IFDIR) {
@@ -514,7 +517,11 @@ int my_link(const char *path, const char *newpath) {
         return -EACCES;
     }
 
-    dir_catalog->insert({name, src_ino});
+    try {
+        dir_catalog->insert({name, src_ino});
+    } catch (const std::bad_alloc &_) {
+        return -ENOMEM;
+    }
     src_node->stats.nlink++;
     update_mtime(dir_node);
     update_ctime(src_node);
@@ -580,7 +587,11 @@ int my_truncate(const char *path, off_t newsize) {
     }
 
     file_content_type *data = reinterpret_cast<file_content_type*>(node->data);
-    data->resize(newsize);
+    try {
+        data->resize(newsize);
+    } catch (const std::bad_alloc &_) {
+        return -ENOMEM;
+    }
     node->stats.st_size = data->size();
     update_mtime(node);
     return 0;
@@ -679,7 +690,11 @@ int my_write(const char *path, const char *buf, size_t size, off_t offset, struc
         return -EINVAL;
     }
 
-    data->resize(std::max(data->size(), offset + size));
+    try {
+        data->resize(std::max(data->size(), offset + size));
+    } catch (const std::bad_alloc &_) {
+        return -ENOMEM;
+    }
     memcpy(data->data() + offset, buf, size);
     node->stats.st_size = data->size();
     update_mtime(node);
@@ -739,9 +754,6 @@ int my_opendir(const char *path, struct fuse_file_info *fi) {
 
     if ((node->stats.mode & S_IFMT) != S_IFDIR) {
         return -ENOTDIR;
-    }
-    if (!check_permissions(node, X_OK)) {
-        return -EACCES;
     }
     fi->fh = ino;    
     return 0;
