@@ -73,6 +73,48 @@ my_context* my_get_context() {
     return reinterpret_cast<my_context*>(fuse_get_context()->private_data);
 }
 
+void update_atime(inode *node) {
+    timespec_get(&node->stats.st_atim, TIME_UTC);
+}
+
+void update_ctime(inode *node) {
+    timespec_get(&node->stats.st_ctim, TIME_UTC);
+}
+
+void update_mtime(inode *node) {
+    timespec_get(&node->stats.st_mtim, TIME_UTC);
+    update_ctime(node);
+}
+
+bool check_permissions(inode *node, int mode) {
+    uid_t uid = fuse_get_context()->uid;
+    gid_t gid = fuse_get_context()->gid;
+    log_msg("Checking permissions uid = %d, gid = %d, mode = 0%o, real mode = 0%o\n", uid, gid, mode, node->stats.mode & 0777);
+
+    if (uid == 0) {
+        if (mode & X_OK) {
+            if (!(node->stats.mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+                log_msg("Permissioon denied for root\n");
+            }
+            return node->stats.mode & (S_IXUSR | S_IXGRP | S_IXOTH);
+        }
+        return true;
+    }
+
+    int real_mode = 0;
+    if (uid == node->stats.uid) {
+        real_mode = (node->stats.mode >> 6) & 7;
+    } else if (gid == node->stats.gid) {
+        real_mode = (node->stats.mode >> 3) & 7;
+    } else {
+        real_mode = node->stats.mode & 7;
+    }
+    if ((real_mode & mode) != mode) {
+        log_msg("Permission denied: asked 0%o, real = 0%o\n", mode, real_mode);
+    }
+    return (real_mode & mode) == mode;
+}
+
 int get_inode_by_path(const char *path) {
     my_context *context = my_get_context();
 
@@ -92,6 +134,9 @@ int get_inode_by_path(const char *path) {
         if ((current_node->stats.mode & S_IFMT) != S_IFDIR) {
             // Not a directory
             return -ENOTDIR;
+        }
+        if (!check_permissions(current_node, X_OK)) {
+            return -EACCES;
         }
 
         const char *prev_symbol = cur_symbol;
@@ -132,8 +177,12 @@ int split_to_inode_and_last_entry(const char *path, std::string &last, int root_
                 return ino;
             }
 
-            if ((my_get_context()->inodes[ino]->stats.mode & S_IFMT) != S_IFDIR) {
+            inode *dir_node = my_get_context()->inodes[ino];
+            if ((dir_node->stats.mode & S_IFMT) != S_IFDIR) {
                 return -ENOTDIR;
+            }
+            if (!check_permissions(dir_node, X_OK)) {
+                return -EACCES;
             }
 
             return ino;
@@ -150,6 +199,7 @@ int get_or_find_inode(const char *path, fuse_file_info *fi) {
 }
 
 int my_getattr(const char *path, struct stat *statbuf) {
+    log_msg("\nmy_getattr(path=\"%s\")\n", path);
     int ino = get_inode_by_path(path);
 
     if (ino < 0) {
@@ -160,13 +210,13 @@ int my_getattr(const char *path, struct stat *statbuf) {
     statbuf->st_atim = cur_stat->st_atim;
     statbuf->st_blocks = cur_stat->st_blocks;
     statbuf->st_ctim = cur_stat->st_ctim;
+    statbuf->st_uid = cur_stat->uid;
     statbuf->st_gid = cur_stat->gid;
     statbuf->st_ino = cur_stat->ino;
     statbuf->st_mode = cur_stat->mode;
     statbuf->st_mtim = cur_stat->st_mtim;
     statbuf->st_nlink = cur_stat->nlink;
     statbuf->st_size = cur_stat->st_size;
-    
     return 0;
 }
 
@@ -190,7 +240,10 @@ inode* gen_new_inode(ino_t parent_ino, mode_t mode, void *data) {
         .open_counter = 0,
     };
 
-    return new inode { new_stat, parent_ino, data };
+    inode* ans = new inode { new_stat, parent_ino, data };
+    update_atime(ans);
+    update_mtime(ans);
+    return ans;
 }
 
 inode *gen_new_dir_inode(ino_t parent_ino, int mode) {
@@ -205,25 +258,6 @@ inode *gen_new_file_inode(ino_t parent_ino, int mode) {
     return node;
 }
 
-int split_path(const char *path, char *buf, std::string &last) {
-    size_t len = strlen(path);
-    strcpy(buf, path);
-    for (char *ptr = buf + len - 1; ; ptr--) {
-        if ((*ptr) == '/') {
-            if (ptr == buf + len - 1) {
-                if (len == 1) {
-                    return -EEXIST;
-                }
-                continue;
-            }
-            last = std::string(ptr + 1, buf + len);
-            *(ptr + 1) = '\0';
-            return 0;
-        }
-    }
-    return -ENOTDIR;
-}
-
 int my_mkdir_or_node(const char *path, mode_t mode) {
     std::string name;
     int dir_ino = split_to_inode_and_last_entry(path, name, EEXIST);
@@ -232,6 +266,9 @@ int my_mkdir_or_node(const char *path, mode_t mode) {
     }
 
     inode *dir_node = my_get_context()->inodes[dir_ino];
+    if (!check_permissions(dir_node, W_OK)) {
+        return -EACCES;
+    }
     catalog_type *dir_catalog = reinterpret_cast<catalog_type*>(dir_node->data);
 
     if (dir_catalog->find(name) != dir_catalog->end()) {
@@ -254,6 +291,7 @@ int my_mkdir_or_node(const char *path, mode_t mode) {
     }
 
     log_msg("Successfully created\n");
+    update_mtime(dir_node);
     return 0;
 }
 
@@ -281,6 +319,9 @@ int my_unlink(const char *path) {
 
     inode *parent = my_get_context()->inodes[parent_ino];
     catalog_type *parent_catalog = reinterpret_cast<catalog_type*>(parent->data);
+    if (!check_permissions(parent, W_OK)) {
+        return -EACCES;
+    }
     if (parent_catalog->find(name) == parent_catalog->end()) {
         return -ENOENT;
     }
@@ -292,12 +333,14 @@ int my_unlink(const char *path) {
     }
 
     parent_catalog->erase(name);
+    update_ctime(node);
     if (--node->stats.nlink == 0 && node->stats.open_counter == 0) {
         log_msg("deleting inode %d\n", ino);
         my_get_context()->inodes.erase((ino_t) ino);
         delete node;
     }
-    return 0;    
+    update_mtime(parent);
+    return 0;
 }
 
 int my_rmdir(const char *path) {    
@@ -313,6 +356,9 @@ int my_rmdir(const char *path) {
 
     if (parent_catalog->find(name) == parent_catalog->end()) {
         return -ENOENT;
+    }
+    if (!check_permissions(parent_node, X_OK)) {
+        return -EACCES;
     }
     ino_t ino = parent_catalog->at(name);
     inode *node = my_get_context()->inodes[ino];
@@ -331,6 +377,7 @@ int my_rmdir(const char *path) {
     my_get_context()->inodes.erase((ino_t) ino);
     parent_node->stats.nlink--;
     delete node;
+    update_mtime(parent_node);
     return 0;
 }
 
@@ -375,6 +422,10 @@ int my_rename(const char *path, const char *newpath) {
 
     inode *dst_dir_node = my_get_context()->inodes[dst_dir_ino];
     catalog_type *dst_catalog = reinterpret_cast<catalog_type*>(dst_dir_node->data);
+    if (!check_permissions(src_dir_node, W_OK) || !check_permissions(dst_dir_node, W_OK)) {
+        return -EACCES;
+    }
+
     if (dst_catalog->find(dst_name) == dst_catalog->end()) {
         dst_catalog->insert({dst_name, src_ino});
         src_catalog->erase(src_name);
@@ -413,6 +464,7 @@ int my_rename(const char *path, const char *newpath) {
             }
 
             dst_catalog->at(dst_name) = src_ino;
+            update_ctime(prev_dst);
             if (--prev_dst->stats.nlink == 0 && prev_dst->stats.open_counter == 0) {
                 my_get_context()->inodes.erase(dst_ino);
                 delete prev_dst;
@@ -421,6 +473,9 @@ int my_rename(const char *path, const char *newpath) {
             src_catalog->erase(src_name);
         }
     }
+    update_mtime(src_dir_node);
+    update_mtime(dst_dir_node);
+    update_ctime(src_node);
     return 0;
 }
 
@@ -451,8 +506,14 @@ int my_link(const char *path, const char *newpath) {
         return -EEXIST;
     }
 
+    if (!check_permissions(dir_node, W_OK)) {
+        return -EACCES;
+    }
+
     dir_catalog->insert({name, src_ino});
     src_node->stats.nlink++;
+    update_mtime(dir_node);
+    update_ctime(src_node);
 
     log_msg("Successfully created link\n");
     return 0;
@@ -463,7 +524,17 @@ int my_chmod(const char *path, mode_t mode) {
     log_msg("\nmy_chmod(fpath=\"%s\", mode=0%03o)\n",
 	    path, mode);
 
-    // TODO: implement chmod (additional task)
+    int ino = get_inode_by_path(path);
+    if (ino < 0) {
+        return ino;
+    }
+    inode *node = my_get_context()->inodes[ino];
+    uid_t uid = fuse_get_context()->uid;
+    if (uid != 0 && uid != node->stats.uid) {
+        return -EPERM;
+    }
+    node->stats.mode = (node->stats.mode & (~0777)) | (mode & 0777);
+    update_ctime(node);
     return 0;
 }
 
@@ -475,8 +546,16 @@ int my_chown(const char *path, uid_t uid, gid_t gid) {
         return ino;
     }
     inode *node = my_get_context()->inodes[ino];
-    node->stats.gid = gid;
+    uid_t caller_uid = fuse_get_context()->uid;
+    gid_t caller_gid = fuse_get_context()->gid;
+    if (caller_uid != 0 && (caller_uid != node->stats.uid || ((int) gid != -1 && gid != caller_gid))) {
+        return -EACCES;
+    }
+    if ((int) gid != -1) {
+        node->stats.gid = gid;
+    }
     node->stats.uid = uid;
+    update_ctime(node);
     return 0;
 }
 
@@ -492,12 +571,14 @@ int my_truncate(const char *path, off_t newsize) {
     if ((node->stats.mode & S_IFMT) == S_IFDIR) {
         return -EISDIR;
     }
+    if (!check_permissions(node, W_OK)) {
+        return -EACCES;
+    }
 
     file_content_type *data = reinterpret_cast<file_content_type*>(node->data);
     data->resize(newsize);
-    node->stats.gid = fuse_get_context()->gid;
-    node->stats.uid = fuse_get_context()->uid;
     node->stats.st_size = data->size();
+    update_mtime(node);
     return 0;
 }
 
@@ -508,8 +589,18 @@ int my_utime(const char *path, struct utimbuf *ubuf) {
     if (ino < 0) {
         return ino;
     }
+    uid_t uid = fuse_get_context()->uid;
+    inode *node = my_get_context()->inodes[ino];
 
-    // TODO: really set something here (additional task)
+    if (uid != 0 && uid != node->stats.uid) {
+        return -EPERM;
+    }
+
+    node->stats.st_mtim.tv_sec = ubuf->modtime;
+    node->stats.st_mtim.tv_nsec = 0;
+    node->stats.st_atim.tv_sec = ubuf->actime;
+    node->stats.st_atim.tv_nsec = 0;
+    update_ctime(node);
     return 0;
 }
 
@@ -521,9 +612,20 @@ int my_open(const char *path, struct fuse_file_info *fi) {
     if (ino < 0) {
         return ino;
     }
-
+    inode *node = my_get_context()->inodes[(ino_t) ino];
+    mode_t mode = 0;
+    if ((fi->flags & O_ACCMODE) == O_RDONLY) {
+        mode = R_OK;
+    } else if ((fi->flags & O_ACCMODE) == O_WRONLY) {
+        mode = W_OK;
+    } else if ((fi->flags & O_ACCMODE) == O_RDWR) {
+        mode = R_OK | W_OK;
+    }
+    if (!check_permissions(node, mode)) {
+        return -EACCES;
+    }
     // TODO: do we need to check for S_IFREG here?
-    my_get_context()->inodes[(ino_t) ino]->stats.open_counter++;
+    node->stats.open_counter++;
     fi->fh = ino;
     return 0;
 }
@@ -539,12 +641,16 @@ int my_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_
 
     inode *node = my_get_context()->inodes[(ino_t) ino];
     file_content_type *data = reinterpret_cast<file_content_type*>(node->data);
+    if ((fi->flags & O_ACCMODE) == O_WRONLY) {
+        return -EACCES;
+    }
     if (offset > (int) data->size()) {
         return -EINVAL;
     }
 
     int result = std::min(size, data->size() - offset);
     memcpy(buf, data->data() + offset, result);
+    update_atime(node);
     return result;
 }
 
@@ -557,17 +663,22 @@ int my_write(const char *path, const char *buf, size_t size, off_t offset, struc
     if (ino < 0) {
         return ino;
     }
+    if ((fi->flags & O_ACCMODE) == O_RDONLY) {
+        return -EACCES;
+    }
     inode *node = my_get_context()->inodes[(ino_t) ino];
     file_content_type *data = reinterpret_cast<file_content_type*>(node->data);
+    if (fi->flags & O_APPEND) {
+        offset = data->size();
+    }
     if (offset > (int) data->size()) {
         return -EINVAL;
     }
 
     data->resize(std::max(data->size(), offset + size));
     memcpy(data->data() + offset, buf, size);
-    node->stats.gid = fuse_get_context()->gid;
-    node->stats.uid = fuse_get_context()->uid;
     node->stats.st_size = data->size();
+    update_mtime(node);
     return size;
 }
 
@@ -586,7 +697,7 @@ int my_statfs(const char *path, struct statvfs *statv) {
 }
 
 int my_flush(const char *path, struct fuse_file_info *fi) {
-    log_msg("\nmy_flush(path=\"%s\", fi=0x%08x)\n", path, fi);	
+    log_msg("\nmy_flush(path=\"%s\", fi=0x%08x)\n", path, fi);
     return 0;
 }
 
@@ -620,12 +731,15 @@ int my_opendir(const char *path, struct fuse_file_info *fi) {
     if (ino < 0) {
         return ino;
     }
+    inode *node = my_get_context()->inodes[(ino_t) ino];
 
-    if ((my_get_context()->inodes[(ino_t) ino]->stats.mode & S_IFMT) != S_IFDIR) {
+    if ((node->stats.mode & S_IFMT) != S_IFDIR) {
         return -ENOTDIR;
     }
-    fi->fh = ino;
-    
+    if (!check_permissions(node, X_OK)) {
+        return -EACCES;
+    }
+    fi->fh = ino;    
     return 0;
 }
 
@@ -634,14 +748,18 @@ int my_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset
 	    path, buf, filler, offset, fi);
 
     ino_t ino = fi->fh;
-    inode* inode = my_get_context()->inodes[ino];
-    catalog_type *catalog = reinterpret_cast<catalog_type*>(inode->data);
+    inode* node = my_get_context()->inodes[ino];
+    if (!check_permissions(node, R_OK)) {
+        return -EACCES;
+    }
+    catalog_type *catalog = reinterpret_cast<catalog_type*>(node->data);
+    update_atime(node);
     for (const auto &[name, childnode] : *catalog) {
         if (filler(buf, name.c_str(), NULL, 0)) {
             return -ENOMEM;
         }
     }
-
+    
     return 0;
 }
 
@@ -667,7 +785,7 @@ void *my_init(struct fuse_conn_info *conn) {
     log_msg("\nmy_init()\n");
     my_context* context = my_get_context();
     
-    inode *root_inode = gen_new_dir_inode(0, 0);
+    inode *root_inode = gen_new_dir_inode(0, 0777);
 
     context->root_ino = 0;
     context->inodes[0] = root_inode;
@@ -686,7 +804,12 @@ int my_access(const char *path, int mask) {
         return ino;
     }
 
-    // TODO: do real checks here (additional task)
+    inode *node = my_get_context()->inodes[ino];
+    if (!check_permissions(node, mask)) {
+        log_msg("Access denied");
+        return -EACCES;
+    }
+    log_msg("Accesss allowed");
     return 0;
 }
 

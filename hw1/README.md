@@ -8,9 +8,10 @@
 В качестве системы сборки используется `Cmake`:
 
 ```
-cmake --build build
-mkdir mountdir
-./build/main mountdir
+mkdir build
+cd build
+cmake ..
+make
 ```
 
 После этих команд in-memory файловая система будет смонтирована в папку `mountdir`.
