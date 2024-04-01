@@ -22,11 +22,15 @@ static ssize_t nulldump_write(struct file *file, const char __user *buf, size_t 
 
     if (kbuf == NULL || hexdump == NULL)
     {
+		kfree(kbuf);
+		kfree(hexdump);
         return -ENOMEM;
     }
 
     if (copy_from_user(kbuf, buf, len))
     {
+		kfree(kbuf);
+		kfree(hexdump);
         return -EACCES;
     }
 
@@ -36,6 +40,8 @@ static ssize_t nulldump_write(struct file *file, const char __user *buf, size_t 
     }
 
 	pr_info("NULLDUMP: write of %lu bytes by pid=%d, cmd=%s, data=0x%s\n", len, current->pid, current->comm, hexdump);
+	kfree(kbuf);
+	kfree(hexdump);
 	return len;
 }
 
