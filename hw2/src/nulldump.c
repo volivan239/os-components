@@ -18,8 +18,6 @@ static ssize_t nulldump_read(struct file *file, char __user *buf, size_t len, lo
 
 static ssize_t nulldump_write(struct file *file, const char __user *buf, size_t len, loff_t *off)
 {
-	// static const int BUF_SIZE = 1024;
-
 	char kbuf[BUF_SIZE];
 	char hexdump[2 * BUF_SIZE + 1];
 
