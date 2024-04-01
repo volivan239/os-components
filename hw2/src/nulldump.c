@@ -3,9 +3,10 @@
 #include <linux/init.h>       /* Макросы */
 #include <linux/fs.h>         /* Макросы для устройств */
 #include <linux/cdev.h>	      /* Функции регистрации символьных устройств */
+#define BUF_SIZE 512
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Author");
+MODULE_AUTHOR("Ivan Volkov");
 MODULE_DESCRIPTION("Nulldump -- /dev/null + dump");
 MODULE_VERSION("0.1");
 
@@ -17,31 +18,34 @@ static ssize_t nulldump_read(struct file *file, char __user *buf, size_t len, lo
 
 static ssize_t nulldump_write(struct file *file, const char __user *buf, size_t len, loff_t *off)
 {
-    char *kbuf = kmalloc(len, GFP_KERNEL);
-    char *hexdump = kmalloc(2 * len + 1, GFP_KERNEL);
+	// static const int BUF_SIZE = 1024;
 
-    if (kbuf == NULL || hexdump == NULL)
-    {
-		kfree(kbuf);
-		kfree(hexdump);
-        return -ENOMEM;
-    }
+	char kbuf[BUF_SIZE];
+	char hexdump[2 * BUF_SIZE + 1];
 
-    if (copy_from_user(kbuf, buf, len))
-    {
-		kfree(kbuf);
-		kfree(hexdump);
-        return -EACCES;
-    }
+	for (size_t i = 0; i < len; i += BUF_SIZE) {
+		size_t curlen = BUF_SIZE;
+		if (len - i < BUF_SIZE) {
+			curlen = len - i;
+		}
 
-    for (size_t i = 0; i < len; i++)
-    {
-        snprintf(hexdump + 2 * i, 3, "%02hhx", kbuf[i]);
-    }
+		if (copy_from_user(kbuf, buf + i, curlen))
+		{
+			return -EFAULT;
+		}
 
-	pr_info("NULLDUMP: write of %lu bytes by pid=%d, cmd=%s, data=0x%s\n", len, current->pid, current->comm, hexdump);
-	kfree(kbuf);
-	kfree(hexdump);
+		for (size_t i = 0; i < curlen; i++)
+		{
+			snprintf(hexdump + 2 * i, 3, "%02hhx", kbuf[i]);
+		}
+
+		if (i == 0) {
+			pr_info("NULLDUMP: write of %lu bytes by pid=%d, cmd=%s, data=0x%s", len, current->pid, current->comm, hexdump);
+		} else {
+			printk(KERN_CONT "%s", hexdump);
+		}
+	}
+	printk(KERN_CONT "\n");
 	return len;
 }
 
