@@ -29,6 +29,11 @@ static ssize_t nulldump_write(struct file *file, const char __user *buf, size_t 
 
 		if (copy_from_user(kbuf, buf + i, curlen))
 		{
+			if (i == 0) {
+				pr_info("NULLDUMP: write of %lu bytes by pid=%d, cmd=%s, EFAULT\n", len, current->pid, current->comm);
+			} else {
+				printk(KERN_CONT "EFAULT\n");
+			}
 			return -EFAULT;
 		}
 
