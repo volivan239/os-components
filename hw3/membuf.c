@@ -115,10 +115,6 @@ static ssize_t membuf_write(struct file *file, const char __user *buf, size_t le
 	ret = len;
 
 	write_lock(&membuf_lock);
-	if (*off >= buf_size) {
-		ret = -EINVAL;
-		goto exit_membuf_write_unlock;
-	}
 	if (*off + len > buf_size) {
 		ret = -ENOSPC;
 		goto exit_membuf_write_unlock;
