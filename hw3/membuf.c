@@ -82,7 +82,11 @@ static ssize_t membuf_read(struct file *file, char __user *buf, size_t len, loff
 	memcpy(mid_buf, buffer + *off, len);
 	read_unlock(&membuf_lock);
 
-	ret = len - copy_to_user(buf, mid_buf, len);
+	if (copy_to_user(buf, mid_buf, len)) {
+		ret = -EFAULT;
+		goto exit_membuf_read_no_unlock;
+	}
+	ret = len;
 	pr_info("MEMBUF: success read of %ld bytes\n", ret);
 	*off += ret;
 	goto exit_membuf_read_no_unlock;
@@ -104,7 +108,11 @@ static ssize_t membuf_write(struct file *file, const char __user *buf, size_t le
 		goto exit_membuf_write_no_unlock;
 	}
 	
-	ret = len - copy_from_user(mid_buf, buf, len);
+	if (copy_from_user(mid_buf, buf, len)) {
+		ret = -EFAULT;
+		goto exit_membuf_write_no_unlock;
+	}
+	ret = len;
 
 	write_lock(&membuf_lock);
 	if (*off >= buf_size) {
@@ -112,7 +120,8 @@ static ssize_t membuf_write(struct file *file, const char __user *buf, size_t le
 		goto exit_membuf_write_unlock;
 	}
 	if (*off + len > buf_size) {
-		len = buf_size - *off;
+		ret = -ENOSPC;
+		goto exit_membuf_write_unlock;
 	}
 	memcpy(buffer + *off, mid_buf, len);
 	write_unlock(&membuf_lock);
@@ -186,7 +195,7 @@ static int __init membuf_start(void)
 		if (buffer == NULL) {
 			return -1;
 		}
-		memset(buffer, 0, sizeof(buf_size));
+		memset(buffer, 0, buf_size);
 	}
         
     return 0;
