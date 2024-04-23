@@ -3,6 +3,7 @@
 #include <linux/init.h>       /* Макросы */
 #include <linux/fs.h>         /* Макросы для устройств */
 #include <linux/cdev.h>	      /* Функции регистрации символьных устройств */
+#include <linux/rwsem.h>
 #include <linux/moduleparam.h>
 
 MODULE_LICENSE("GPL");
@@ -14,11 +15,12 @@ static size_t buf_size = 2048;
 static const size_t BUF_SIZE_MAX = 1 << 30;
 static char *buffer = NULL;
 
-DEFINE_RWLOCK(membuf_lock);
+DECLARE_RWSEM(membuf_sem);
 
 static int buf_size_set(const char *val, const struct kernel_param *kp)
 {
 	size_t new_buf_size = 0;
+	size_t old_buf_size = 0;
 	int res, ret;
 
 	res = kstrtoul(val, 10, &new_buf_size);
@@ -35,7 +37,7 @@ static int buf_size_set(const char *val, const struct kernel_param *kp)
 
 	memset(new_buffer, 0, new_buf_size);
 
-	write_lock(&membuf_lock);
+	down_write(&membuf_sem);
 
 	if (buffer != NULL) {
 		size_t min_size = new_buf_size < buf_size ? new_buf_size : buf_size;
@@ -44,10 +46,11 @@ static int buf_size_set(const char *val, const struct kernel_param *kp)
 	}
 	buffer = new_buffer;
 	ret = param_set_int(val, kp);
+	old_buf_size = buf_size;
 
-	write_unlock(&membuf_lock);
+	up_write(&membuf_sem);
 
-	pr_info("SUCCESS old: %lu, new: %lu\n", buf_size, new_buf_size);
+	pr_info("SUCCESS old: %lu, new: %lu\n", old_buf_size, new_buf_size);
 
 exit_buf_size_set:
 	return ret;
@@ -65,13 +68,7 @@ static ssize_t membuf_read(struct file *file, char __user *buf, size_t len, loff
 	ssize_t ret;
 	pr_info("MEMBUF: read %lu bytes\n", len);
 
-	char *mid_buf = kmalloc(len, GFP_KERNEL);
-	if (mid_buf == NULL) {
-		ret = -ENOMEM;
-		goto exit_membuf_read_no_unlock;
-	}
-
-	read_lock(&membuf_lock);
+	down_read(&membuf_sem);
 	if (*off > buf_size) {
 		ret = -EINVAL;
 		goto exit_membuf_read_unlock;
@@ -79,20 +76,20 @@ static ssize_t membuf_read(struct file *file, char __user *buf, size_t len, loff
 	if (*off + len > buf_size) {
 		len = buf_size - *off;
 	}
-	memcpy(mid_buf, buffer + *off, len);
-	read_unlock(&membuf_lock);
-
-	if (copy_to_user(buf, mid_buf, len)) {
+	if (copy_to_user(buf, buffer + *off, len)) {
 		ret = -EFAULT;
-		goto exit_membuf_read_no_unlock;
+		goto exit_membuf_read_unlock;
 	}
+	up_read(&membuf_sem);
+
 	ret = len;
 	pr_info("MEMBUF: success read of %ld bytes\n", ret);
 	*off += ret;
+
 	goto exit_membuf_read_no_unlock;
 
 exit_membuf_read_unlock:
-	read_unlock(&membuf_lock);
+	up_read(&membuf_sem);
 exit_membuf_read_no_unlock:
 	return ret;
 }
@@ -102,32 +99,25 @@ static ssize_t membuf_write(struct file *file, const char __user *buf, size_t le
 	ssize_t ret;
 
 	pr_info("MEMBUF: write %lu bytes\n", len);
-	char *mid_buf = kmalloc(len, GFP_KERNEL);
-	if (mid_buf == NULL) {
-		ret = -ENOMEM;
-		goto exit_membuf_write_no_unlock;
-	}
-	
-	if (copy_from_user(mid_buf, buf, len)) {
-		ret = -EFAULT;
-		goto exit_membuf_write_no_unlock;
-	}
-	ret = len;
 
-	write_lock(&membuf_lock);
+	down_write(&membuf_sem);
 	if (*off + len > buf_size) {
 		ret = -ENOSPC;
 		goto exit_membuf_write_unlock;
 	}
-	memcpy(buffer + *off, mid_buf, len);
-	write_unlock(&membuf_lock);
+	if (copy_from_user(buffer + *off, buf, len)) {
+		ret = -EFAULT;
+		goto exit_membuf_write_unlock;
+	}
+	ret = len;
+	up_write(&membuf_sem);
 
 	pr_info("MEMBUF: success write of %ld bytes\n", ret);
 	*off += ret;
 	goto exit_membuf_write_no_unlock;
 
 exit_membuf_write_unlock:
-	write_unlock(&membuf_lock);
+	up_write(&membuf_sem);
 exit_membuf_write_no_unlock:
 	return ret;
 }
