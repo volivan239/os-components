@@ -13,8 +13,8 @@ MODULE_VERSION("0.1");
 
 #define DEV_NAME                     "blockdev"
 #define KERNEL_SECTOR_SIZE           512
-#define NR_SECTORS                   1024
 
+static int nr_sectors = 1024;
 int major = 0;
 
 static struct my_block_dev {
@@ -24,6 +24,50 @@ static struct my_block_dev {
 	spinlock_t lock;
 	char *data;
 } dev;
+
+static int blockdevsize_set(const char *val, const struct kernel_param *kp)
+{
+	size_t new_nr = 0;
+	size_t old_size = nr_sectors * KERNEL_SECTOR_SIZE;
+	int res, ret;
+
+	res = kstrtoul(val, 10, &new_nr);
+	if (res != 0) {
+		ret = -EINVAL;
+		goto exit_blockdevsize_set;
+	}
+
+	size_t new_size = new_nr * KERNEL_SECTOR_SIZE;
+
+	char *new_data = vmalloc(new_size);
+	if (new_data == NULL) {
+		ret = -ENOMEM;
+		goto exit_blockdevsize_set;
+	}
+
+	memset(new_data, 0, new_size);
+
+	if (dev.data != NULL) {
+		size_t min_size = new_size < old_size ? new_size : old_size;
+		memcpy(new_data, dev.data, min_size);
+		vfree(dev.data);
+	}
+
+	dev.data = new_data;
+	ret = param_set_int(val, kp);
+
+	pr_info("SUCCESS old: %lu, new: %lu\n", old_size, new_size);
+
+exit_blockdevsize_set:
+	return ret;
+}
+
+static const struct kernel_param_ops param_ops = {
+	.set	= blockdevsize_set,
+	.get	= param_get_int,
+};
+
+module_param_cb(blockdevsize, &param_ops, &nr_sectors, 0664);
 
 static blk_status_t my_block_request(struct blk_mq_hw_ctx *hctx,
                                      const struct blk_mq_queue_data *bd)
@@ -43,7 +87,7 @@ static blk_status_t my_block_request(struct blk_mq_hw_ctx *hctx,
 	struct bio_vec bvec;
     struct req_iterator iter;
     size_t pos = blk_rq_pos(rq) * KERNEL_SECTOR_SIZE;
-    size_t dev_size = NR_SECTORS * KERNEL_SECTOR_SIZE;
+    size_t dev_size = nr_sectors * KERNEL_SECTOR_SIZE;
 
 	rq_for_each_segment(bvec, rq, iter)
 	{
@@ -137,10 +181,10 @@ static int __init blockdev_start(void)
 	dev.gd->fops = &my_block_ops;
 	dev.gd->private_data = &dev;
 	snprintf(dev.gd->disk_name, 32, DEV_NAME);
-	set_capacity(dev.gd, NR_SECTORS);
+	set_capacity(dev.gd, nr_sectors);
 	printk(KERN_INFO "Set device properties\n");
 
-	dev.data = vmalloc(NR_SECTORS * KERNEL_SECTOR_SIZE);
+	dev.data = vmalloc(nr_sectors * KERNEL_SECTOR_SIZE);
 	if (dev.data == NULL) {
 		printk(KERN_ERR "Unable to allocate enough memory for device");
 		return -ENOMEM;
@@ -148,7 +192,6 @@ static int __init blockdev_start(void)
 
     status = add_disk(dev.gd);
 	printk(KERN_INFO "successfully added block device, status = %d\n", status);
-
     return 0;
 }
 
@@ -159,6 +202,7 @@ static void __exit blockdev_end(void)
 	}
 	blk_mq_destroy_queue(dev.queue);
     blk_mq_free_tag_set(&dev.tag_set);
+	vfree(dev.data);
 	unregister_blkdev(major, DEV_NAME);
 	pr_info("BLOCKDEV: unload\n");
 }
